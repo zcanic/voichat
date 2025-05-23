@@ -1,567 +1,390 @@
-import customtkinter as ctk # Renamed from customtkinter
-import threading
-import re # For parsing speaker ID from combobox if needed later, not strictly for Step 9
+import customtkinter as ctk
+import tkinter as tk
+from settings_manager import SettingsManager
 
-# Assuming VoicevoxService is in voicevox_service.py for static method calls
-from voicevox_service import VoicevoxService
+# --- Bento Cell Creation ---
+def create_bento_cell(parent_container, cell_name, row, col, rowspan=1, colspan=1, 
+                      fg_color=("gray75", "gray25"), text_color=None, 
+                      border_width=1, border_color=("gray60", "gray40")):
+    """
+    Creates a standardized styled frame (a "bento cell") within a parent container.
+    The cell includes a placeholder label with its name, which should ideally be
+    removed or replaced by actual content later.
+    """
+    cell_frame = ctk.CTkFrame(
+        parent_container, 
+        fg_color=fg_color,
+        border_width=border_width,
+        border_color=border_color,
+        corner_radius=8 
+    )
+    cell_frame.grid(row=row, column=col, rowspan=rowspan, colspan=colspan, sticky="nsew", padx=5, pady=5)
+    
+    label = ctk.CTkLabel(cell_frame, text=cell_name, text_color=text_color)
+    label.place(relx=0.5, rely=0.5, anchor="center") 
+    
+    return cell_frame
+
+# --- Conversation Bubble ---
+class ConversationBubble(ctk.CTkFrame):
+    def __init__(self, parent, message_text, role, max_width=400, 
+                 is_primary_assistant_response=False, app_instance=None, 
+                 translated_text_for_replay=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        self.app_instance = app_instance
+        self.translated_text_for_replay = translated_text_for_replay
+        self.role = role
+
+        if role == "user":
+            self.configure(fg_color=("#3b82f6", "#2563eb")) # Tailwind blue-500 / blue-600
+            self.pack_padx_outer = (50, 10) 
+            text_anchor = "e"
+        elif role == "assistant":
+            self.configure(fg_color=("#e5e7eb", "#374151")) # Tailwind gray-200 / gray-700
+            self.pack_padx_outer = (10, 50)
+            text_anchor = "w"
+        elif role == "translation":
+            self.configure(fg_color=("#a855f7", "#7e22ce")) # Tailwind purple-500 / purple-700
+            self.pack_padx_outer = (20, 60) 
+            text_anchor = "w"
+        else: 
+            self.configure(fg_color="red")
+            self.pack_padx_outer = (10, 10)
+            text_anchor = "c"
+
+        self.columnconfigure(0, weight=1) 
+        if role == "assistant" and self.app_instance and self.translated_text_for_replay:
+            self.columnconfigure(1, weight=0) 
+
+        self.message_label = ctk.CTkLabel(
+            self, text=message_text, wraplength=max_width - 40,
+            justify="left" if text_anchor == "w" else "right", anchor=text_anchor
+        )
+        self.message_label.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+
+        if role == "assistant" and self.app_instance and self.translated_text_for_replay:
+            self.replay_button = ctk.CTkButton(
+                self, text="🗣️", width=20, height=20,
+                command=self._replay_audio_action,
+                fg_color="transparent", hover_color=("gray70", "gray30")
+            )
+            self.replay_button.grid(row=0, column=1, sticky="e", padx=(0,5), pady=5)
+
+    def _replay_audio_action(self):
+        if self.app_instance and self.translated_text_for_replay:
+            self.app_instance.replay_audio(self.translated_text_for_replay)
 
 
+# --- Settings Panel ---
 class SettingsPanel(ctk.CTkToplevel):
-    def __init__(self, parent, settings_manager, app): # app instance for callbacks
-        super().__init__(parent)
-        self.title("Settings")
-        self.transient(parent)
-        self.grab_set()
+    def __init__(self, parent, settings_manager: SettingsManager, app=None, **kwargs): 
+        super().__init__(parent, **kwargs)
+        self.app_instance = app 
         self.settings_manager = settings_manager
-        self.app = app # Store the app instance (main_app.App)
         
-        self.geometry("700x550")
-
-        self.tabview = ctk.CTkTabview(self, width=680, height=450)
-        self.tabview.pack(padx=10, pady=10, fill="both", expand=True)
-
-        self.tabview.add("Primary LLM")
-        self.tabview.add("Translation LLM")
-        self.tabview.add("Voicevox")
-        self.tabview.add("Appearance & General")
-
-        self._create_primary_llm_tab(self.tabview.tab("Primary LLM"))
-        self._create_translation_llm_tab(self.tabview.tab("Translation LLM"))
-        self._create_voicevox_tab(self.tabview.tab("Voicevox"))
-        self._create_appearance_tab(self.tabview.tab("Appearance & General"))
-
-        button_frame = ctk.CTkFrame(self)
-        button_frame.pack(fill="x", padx=10, pady=(0,10))
-
-        save_button = ctk.CTkButton(button_frame, text="Save & Close", command=self._save_and_close)
-        save_button.pack(side="right", padx=5, pady=5)
-
-        cancel_button = ctk.CTkButton(button_frame, text="Cancel", command=self.destroy)
-        cancel_button.pack(side="right", padx=5, pady=5)
-
-    def _create_llm_tab_content(self, tab_frame, llm_type_key):
-        # Helper to create common LLM settings widgets
-        tab_frame.grid_columnconfigure(1, weight=1)
-
-        widgets = {}
-
-        ctk.CTkLabel(tab_frame, text="API Base URL:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        widgets["api_base_url_entry"] = ctk.CTkEntry(tab_frame)
-        widgets["api_base_url_entry"].grid(row=0, column=1, padx=10, pady=5, sticky="ew")
-
-        ctk.CTkLabel(tab_frame, text="API Key:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        widgets["api_key_entry"] = ctk.CTkEntry(tab_frame, show="*")
-        widgets["api_key_entry"].grid(row=1, column=1, padx=10, pady=5, sticky="ew")
-
-        ctk.CTkLabel(tab_frame, text="Model:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        widgets["model_entry"] = ctk.CTkEntry(tab_frame)
-        widgets["model_entry"].grid(row=2, column=1, padx=10, pady=5, sticky="ew")
-
-        ctk.CTkLabel(tab_frame, text="Temperature:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
-        temp_slider_frame = ctk.CTkFrame(tab_frame)
-        temp_slider_frame.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
-        temp_slider_frame.grid_columnconfigure(0, weight=1)
+        self.title("Settings")
         
-        widgets["temp_slider"] = ctk.CTkSlider(temp_slider_frame, from_=0.0, to=1.0, number_of_steps=100)
-        widgets["temp_slider"].grid(row=0, column=0, padx=(0,5), pady=5, sticky="ew")
-        widgets["temp_value_label"] = ctk.CTkLabel(temp_slider_frame, text="0.7") # Default text
-        widgets["temp_value_label"].grid(row=0, column=1, padx=(5,0), pady=5, sticky="w")
-        widgets["temp_slider"].configure(command=lambda val, label=widgets["temp_value_label"]: label.configure(text=f"{val:.2f}"))
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+        self.target_width = int(parent_width * 0.7)
+        self.target_height = int(parent_height * 0.8)
         
-        ctk.CTkLabel(tab_frame, text="System Prompt:").grid(row=4, column=0, padx=10, pady=5, sticky="nw")
-        widgets["system_prompt_text"] = ctk.CTkTextbox(tab_frame, height=100)
-        widgets["system_prompt_text"].grid(row=4, column=1, padx=10, pady=5, sticky="nsew")
-        tab_frame.grid_rowconfigure(4, weight=1)
+        self.initial_x = parent.winfo_x() + (parent_width - self.target_width) // 2
+        self.initial_y = parent.winfo_y() + (parent_height - self.target_height) // 2
         
-        return widgets
+        self.current_height = 10 
+        y_start_pos = self.initial_y + (self.target_height // 2) - (self.current_height // 2)
+        self.geometry(f"{self.target_width}x{self.current_height}+{self.initial_x}+{y_start_pos}")
 
-    def _load_llm_settings(self, widgets, llm_type_key):
-        settings = self.settings_manager.get_setting(llm_type_key)
-        if settings:
-            widgets["api_base_url_entry"].insert(0, settings.get("api_base_url", ""))
-            widgets["api_key_entry"].insert(0, settings.get("api_key", ""))
-            widgets["model_entry"].insert(0, settings.get("model", ""))
-            temp = settings.get("temperature", 0.7)
-            widgets["temp_slider"].set(float(temp))
-            widgets["temp_value_label"].configure(text=f"{float(temp):.2f}")
-            widgets["system_prompt_text"].insert("1.0", settings.get("system_prompt", ""))
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.start_close_animation)
 
-    def _save_llm_settings(self, widgets, llm_type_key):
-        self.settings_manager.update_setting(llm_type_key, widgets["api_base_url_entry"].get(), "api_base_url")
-        self.settings_manager.update_setting(llm_type_key, widgets["api_key_entry"].get(), "api_key")
-        self.settings_manager.update_setting(llm_type_key, widgets["model_entry"].get(), "model")
-        self.settings_manager.update_setting(llm_type_key, float(widgets["temp_slider"].get()), "temperature")
-        self.settings_manager.update_setting(llm_type_key, widgets["system_prompt_text"].get("1.0", "end-1c"), "system_prompt")
+        self.main_frame = ctk.CTkFrame(self)
+        self.main_frame.pack(expand=True, fill="both", padx=10, pady=10)
 
-    def _create_primary_llm_tab(self, tab_frame):
-        self.primary_llm_widgets = self._create_llm_tab_content(tab_frame, "primary_llm")
-        self._load_llm_settings(self.primary_llm_widgets, "primary_llm")
+        self.tab_view = ctk.CTkTabview(self.main_frame)
+        self.tab_view.pack(expand=True, fill="both", padx=5, pady=5)
 
-    def _create_translation_llm_tab(self, tab_frame):
-        self.translation_llm_widgets = self._create_llm_tab_content(tab_frame, "translation_llm")
-        self._load_llm_settings(self.translation_llm_widgets, "translation_llm")
+        self._create_llm_settings_tab(self.tab_view.add("Primary LLM"))
+        self._create_llm_settings_tab(self.tab_view.add("Translation LLM"), llm_type="translation_llm")
+        self._create_voicevox_settings_tab(self.tab_view.add("Voicevox TTS"))
+        self._create_appearance_settings_tab(self.tab_view.add("Appearance"))
+        self._create_data_management_tab(self.tab_view.add("Data"))
 
-    def _create_voicevox_tab(self, tab_frame):
-        tab_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(tab_frame, text="Engine Address:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        self.voicevox_engine_address_entry = ctk.CTkEntry(tab_frame)
-        self.voicevox_engine_address_entry.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
-
-        ctk.CTkLabel(tab_frame, text="Speaker ID:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        self.voicevox_speaker_id_combobox = ctk.CTkComboBox(tab_frame, values=[], state="normal", command=None) # Allow manual entry
-        self.voicevox_speaker_id_combobox.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
-        self.voicevox_speaker_id_combobox.set("") 
-
-        self.speaker_name_to_id_map = {} # Initialize map
-
-        button_frame = ctk.CTkFrame(tab_frame)
-        button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        self.buttons_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.buttons_frame.pack(fill="x", padx=5, pady=(5,10))
         
-        self.voicevox_refresh_button = ctk.CTkButton(button_frame, text="Refresh Speakers", command=self._refresh_voicevox_speakers)
-        self.voicevox_refresh_button.pack(side="left", padx=5)
+        self.save_button = ctk.CTkButton(self.buttons_frame, text="Save & Close", command=self._save_and_close)
+        self.save_button.pack(side="right", padx=(10,0))
         
-        self.voicevox_test_button = ctk.CTkButton(button_frame, text="Test Voicevox", command=self._test_voicevox_connection)
-        self.voicevox_test_button.pack(side="left", padx=5)
+        self.cancel_button = ctk.CTkButton(self.buttons_frame, text="Cancel", command=self.start_close_animation, fg_color=("gray60", "gray25"))
+        self.cancel_button.pack(side="right")
 
-        self.voicevox_status_label = ctk.CTkLabel(tab_frame, text="", height=1, wraplength=tab_frame.winfo_width()-20)
-        self.voicevox_status_label.grid(row=3, column=0, columnspan=2, padx=10, pady=(0,5), sticky="ew")
+    def animate_open(self, current_height=None):
+        if current_height is None:
+            current_height = self.current_height
         
-        self._load_voicevox_settings()
+        animation_steps = 20 
+        step_height_increment = int((self.target_height - self.current_height) / animation_steps) if animation_steps > 0 else (self.target_height - self.current_height)
+        if step_height_increment < 1 and self.target_height > current_height : step_height_increment = 1
+        
+        new_height = min(current_height + step_height_increment, self.target_height)
+        
+        new_y = self.initial_y + (self.target_height - new_height) // 2
+        
+        self.geometry(f"{self.target_width}x{int(new_height)}+{self.initial_x}+{new_y}")
+        self.current_height = new_height
 
-    def _load_voicevox_settings(self):
+        if new_height < self.target_height:
+            self.after(15, lambda: self.animate_open(new_height)) 
+        else:
+            self.geometry(f"{self.target_width}x{int(self.target_height)}+{self.initial_x}+{self.initial_y}") 
+            self.grab_set() 
+            self.lift()     
+
+    def start_close_animation(self):
+        if self.app_instance:
+            self.app_instance.remove_dimmer() 
+        self.grab_release() 
+        self.animate_close()
+
+    def animate_close(self, current_height=None):
+        if current_height is None:
+            current_height = self.winfo_height()
+        
+        animation_steps = 20
+        step_height_decrement = int(self.target_height / animation_steps) 
+        if step_height_decrement < 1: step_height_decrement = 1
+        animation_delay_ms = 10
+        
+        new_height = max(current_height - step_height_decrement, 0)
+        new_y = self.initial_y + (self.target_height - new_height) // 2
+
+        self.geometry(f"{self.target_width}x{int(new_height)}+{self.initial_x}+{new_y}")
+
+        if new_height > 0:
+            self.after(animation_delay_ms, lambda: self.animate_close(new_height))
+        else:
+            self.destroy()
+
+    def _create_llm_settings_tab(self, tab, llm_type="primary_llm"):
+        settings = self.settings_manager.get_setting(llm_type)
+        
+        ctk.CTkLabel(tab, text="API Base URL:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        api_base_entry = ctk.CTkEntry(tab, width=350)
+        api_base_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        api_base_entry.insert(0, settings.get("api_base_url", ""))
+        
+        ctk.CTkLabel(tab, text="API Key:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        api_key_entry = ctk.CTkEntry(tab, width=350, show="*")
+        api_key_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        api_key_entry.insert(0, settings.get("api_key", ""))
+        
+        ctk.CTkLabel(tab, text="Model:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        model_entry = ctk.CTkEntry(tab, width=350)
+        model_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        model_entry.insert(0, settings.get("model", ""))
+        
+        ctk.CTkLabel(tab, text="Temperature:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        temp_entry = ctk.CTkEntry(tab, width=100)
+        temp_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        temp_entry.insert(0, str(settings.get("temperature", "0.2")))
+
+        ctk.CTkLabel(tab, text="System Prompt:").grid(row=4, column=0, padx=5, pady=(5,0), sticky="nw")
+        system_prompt_textbox = ctk.CTkTextbox(tab, height=100, wrap="word")
+        system_prompt_textbox.grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        system_prompt_textbox.insert("1.0", settings.get("system_prompt", ""))
+        
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(5, weight=1)
+
+        setattr(self, f"{llm_type}_api_base_entry", api_base_entry)
+        setattr(self, f"{llm_type}_api_key_entry", api_key_entry)
+        setattr(self, f"{llm_type}_model_entry", model_entry)
+        setattr(self, f"{llm_type}_temp_entry", temp_entry)
+        setattr(self, f"{llm_type}_system_prompt_textbox", system_prompt_textbox)
+
+    def _create_voicevox_settings_tab(self, tab):
         settings = self.settings_manager.get_setting("voicevox")
-        engine_address = ""
-        if settings:
-            engine_address = settings.get("engine_address", "")
-            self.voicevox_engine_address_entry.insert(0, engine_address)
-            self.current_saved_speaker_id = settings.get("speaker_id") # Store as int
-            # Set the raw ID into combobox text field initially. 
-            # _refresh_voicevox_speakers will attempt to map it to display name.
-            if self.current_saved_speaker_id is not None:
-                 self.voicevox_speaker_id_combobox.set(str(self.current_saved_speaker_id))
-            else:
-                self.voicevox_speaker_id_combobox.set("")
-
-
-        if engine_address:
-            self._refresh_voicevox_speakers() # This will populate and try to select
-        else:
-            self.voicevox_speaker_id_combobox.configure(values=[]) # No address, no speakers
-            self.voicevox_speaker_id_combobox.set("")
-            self.voicevox_status_label.configure(text="Engine address not set.")
-
-
-    def _refresh_voicevox_speakers(self):
-        self.voicevox_refresh_button.configure(state="disabled")
-        self.voicevox_speaker_id_combobox.configure(state="disabled")
-        self.voicevox_status_label.configure(text="Refreshing speakers...", text_color=None)
-
-        engine_address = self.voicevox_engine_address_entry.get().strip()
-        if not engine_address:
-            self.voicevox_status_label.configure(text="Error: Engine address is required.", text_color="orange")
-            self.voicevox_refresh_button.configure(state="normal")
-            # Keep combobox disabled as there's no valid address
-            return
-
-        is_available, message = VoicevoxService.is_engine_available(engine_address)
-        if not is_available:
-            self.voicevox_status_label.configure(text=f"Engine not reachable: {message}", text_color="orange")
-            self.voicevox_refresh_button.configure(state="normal")
-            self.voicevox_speaker_id_combobox.configure(state="normal") 
-            return
         
-        self.voicevox_status_label.configure(text="Fetching speakers from engine...")
-        threading.Thread(target=self._fetch_speakers_thread_worker, args=(engine_address,), daemon=True).start()
+        ctk.CTkLabel(tab, text="Voicevox Engine Address:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.voicevox_engine_entry = ctk.CTkEntry(tab, width=300)
+        self.voicevox_engine_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.voicevox_engine_entry.insert(0, settings.get("engine_address", "http://localhost:50021"))
 
-    def _fetch_speakers_thread_worker(self, engine_address):
-        speakers_data, error_msg = VoicevoxService.get_speakers(engine_address)
-        self.after(0, lambda: self._update_speaker_list_ui(speakers_data, error_msg))
-
-    def _update_speaker_list_ui(self, speakers_data, error_msg):
-        self.voicevox_refresh_button.configure(state="normal")
-        self.voicevox_speaker_id_combobox.configure(state="normal")
-        self.speaker_name_to_id_map.clear()
+        ctk.CTkLabel(tab, text="Speaker ID:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.voicevox_speaker_id_entry = ctk.CTkEntry(tab, width=100)
+        self.voicevox_speaker_id_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        self.voicevox_speaker_id_entry.insert(0, str(settings.get("speaker_id", "1")))
         
-        if error_msg:
-            self.voicevox_status_label.configure(text=f"Error: {error_msg}", text_color="orange")
-            self.voicevox_speaker_id_combobox.configure(values=[])
-            self.voicevox_speaker_id_combobox.set("")
-            return
-
-        if not speakers_data:
-            self.voicevox_status_label.configure(text="Failed to load speakers or no speakers found.", text_color="orange")
-            self.voicevox_speaker_id_combobox.configure(values=[])
-            self.voicevox_speaker_id_combobox.set("")
-            return
-
-        speaker_display_values = []
-        value_to_set_display_name = ""
-
-        for speaker_group in speakers_data:
-            group_name = speaker_group.get("name", "Unknown Speaker")
-            for style in speaker_group.get("styles", []):
-                style_name = style.get("name", "Default Style")
-                style_id = style.get("id")
-                display_name = f"{group_name} - {style_name} (ID: {style_id})"
-                speaker_display_values.append(display_name)
-                self.speaker_name_to_id_map[display_name] = style_id
-                
-                if hasattr(self, 'current_saved_speaker_id') and style_id == self.current_saved_speaker_id:
-                    value_to_set_display_name = display_name
+        self.voicevox_test_button = ctk.CTkButton(tab, text="Test Voicevox", command=self._test_voicevox)
+        self.voicevox_test_button.grid(row=2, column=0, columnspan=2, pady=10)
         
-        current_combobox_text = self.voicevox_speaker_id_combobox.get()
+        tab.grid_columnconfigure(1, weight=1)
 
-        self.voicevox_speaker_id_combobox.configure(values=speaker_display_values)
-
-        if value_to_set_display_name:
-            self.voicevox_speaker_id_combobox.set(value_to_set_display_name)
-        elif speaker_display_values: # If saved ID not found, try to keep current text if it's a valid ID, else first
-            try: # Check if current text is a raw ID that exists
-                raw_id_check = int(current_combobox_text)
-                if raw_id_check in self.speaker_name_to_id_map.values():
-                    # Find the display name for this raw ID
-                    for dn, i_d in self.speaker_name_to_id_map.items():
-                        if i_d == raw_id_check:
-                            self.voicevox_speaker_id_combobox.set(dn)
-                            break
-                else: # Raw ID not in list, set to first
-                    self.voicevox_speaker_id_combobox.set(speaker_display_values[0])
-            except ValueError: # Not a raw ID, set to first
-                 self.voicevox_speaker_id_combobox.set(speaker_display_values[0])
-        else:
-            self.voicevox_speaker_id_combobox.set("")
-            
-        self.voicevox_status_label.configure(text="Speakers refreshed.", text_color=None) 
-
-    def _test_voicevox_connection(self):
-        self.voicevox_test_button.configure(state="disabled")
-        self.voicevox_status_label.configure(text="Testing Voicevox...", text_color=None)
-
-        engine_address = self.voicevox_engine_address_entry.get().strip()
-        selected_value = self.voicevox_speaker_id_combobox.get()
-        
-        parsed_speaker_id = None
-        if not selected_value:
-            self.voicevox_status_label.configure(text="Error: Speaker ID not selected.", text_color="orange")
-            self.voicevox_test_button.configure(state="normal")
-            return
-
-        if selected_value in self.speaker_name_to_id_map:
-            parsed_speaker_id = self.speaker_name_to_id_map[selected_value]
-        else:
-            try:
-                parsed_speaker_id = int(selected_value)
-            except ValueError:
-                self.voicevox_status_label.configure(text="Error: Invalid Speaker ID format.", text_color="orange")
-                self.voicevox_test_button.configure(state="normal")
-                return
-
-        if not engine_address:
-            self.voicevox_status_label.configure(text="Error: Engine address required.", text_color="orange")
-            self.voicevox_test_button.configure(state="normal")
-            return
-
-        threading.Thread(target=self._test_voicevox_thread_worker, args=(engine_address, parsed_speaker_id), daemon=True).start()
-
-    def _test_voicevox_thread_worker(self, engine_address, speaker_id):
-        temp_service = VoicevoxService(engine_address, speaker_id)
-        
-        available, status_msg = VoicevoxService.is_engine_available(engine_address)
-        if not available:
-            self.after(0, lambda: self._update_test_status(f"Test failed: Engine - {status_msg}", True))
-            return
-
-        test_phrase = "こんにちは、これはテストです。"
-        audio_query, error_msg = temp_service.generate_audio_query(test_phrase)
-        if error_msg:
-            self.after(0, lambda: self._update_test_status(f"Test failed: Query - {error_msg}", True))
-            return
-
-        audio_data, error_msg = temp_service.synthesize_speech_data(audio_query)
-        if error_msg:
-            self.after(0, lambda: self._update_test_status(f"Test failed: Synth - {error_msg}", True))
-            return
-        
-        success, playback_msg = temp_service.play_audio_bytes(audio_data)
-        if success:
-            self.after(0, lambda: self._update_test_status("Test sound played successfully.", False))
-        else:
-            self.after(0, lambda: self._update_test_status(f"Test: Playback - {playback_msg}", True))
-            
-    def _update_test_status(self, message, is_error):
-        self.voicevox_status_label.configure(text=message, text_color="orange" if is_error else None)
-        self.voicevox_test_button.configure(state="normal")
-
-    def _create_appearance_tab(self, tab_frame):
-        tab_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(tab_frame, text="Theme:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        self.appearance_theme_segmented_button = ctk.CTkSegmentedButton(tab_frame, values=["Light", "Dark", "System"])
-        self.appearance_theme_segmented_button.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
-
-        ctk.CTkLabel(tab_frame, text="Font Size:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        self.appearance_font_size_optionmenu = ctk.CTkOptionMenu(tab_frame, values=["Small", "Medium", "Large"])
-        self.appearance_font_size_optionmenu.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        
-        # Voice Mode Toggle (Part of Step 9)
-        ctk.CTkLabel(tab_frame, text="Voice Mode:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        self.general_voice_mode_switch = ctk.CTkSwitch(tab_frame, text="Enable Voice Output")
-        self.general_voice_mode_switch.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-
-        self._load_appearance_settings()
-        
-    def _load_appearance_settings(self):
+    def _create_appearance_settings_tab(self, tab):
         settings = self.settings_manager.get_setting("appearance")
-        if settings:
-            self.appearance_theme_segmented_button.set(settings.get("theme", "System").capitalize())
-            self.appearance_font_size_optionmenu.set(settings.get("font_size", "Medium").capitalize())
         
-        voice_mode_on = self.settings_manager.get_setting("voice_mode_on")
-        if voice_mode_on:
-            self.general_voice_mode_switch.select()
-        else:
-            self.general_voice_mode_switch.deselect()
+        ctk.CTkLabel(tab, text="Theme:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.theme_menu = ctk.CTkOptionMenu(tab, values=["Light", "Dark", "System"],
+                                            command=self._on_theme_change)
+        self.theme_menu.set(settings.get("theme", "system").capitalize())
+        self.theme_menu.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+    def _create_data_management_tab(self, tab):
+        ctk.CTkLabel(tab, text="Conversation History:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.clear_conv_button = ctk.CTkButton(tab, text="Clear Conversation History", command=self._confirm_clear_conversation)
+        self.clear_conv_button.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+        ctk.CTkLabel(tab, text="Settings File:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.reset_settings_button = ctk.CTkButton(tab, text="Reset All Settings to Default", command=self._confirm_reset_settings)
+        self.reset_settings_button.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+    def _on_theme_change(self, new_theme: str):
+        if self.app_instance:
+            self.app_instance.apply_theme_from_settings_panel(new_theme)
+
+    def _save_settings(self):
+        self.settings_manager.update_setting("primary_llm", self.primary_llm_api_base_entry.get(), "api_base_url")
+        self.settings_manager.update_setting("primary_llm", self.primary_llm_api_key_entry.get(), "api_key")
+        self.settings_manager.update_setting("primary_llm", self.primary_llm_model_entry.get(), "model")
+        self.settings_manager.update_setting("primary_llm", float(self.primary_llm_temp_entry.get()), "temperature")
+        self.settings_manager.update_setting("primary_llm", self.primary_llm_system_prompt_textbox.get("1.0", "end-1c"), "system_prompt")
+
+        self.settings_manager.update_setting("translation_llm", self.translation_llm_api_base_entry.get(), "api_base_url")
+        self.settings_manager.update_setting("translation_llm", self.translation_llm_api_key_entry.get(), "api_key")
+        self.settings_manager.update_setting("translation_llm", self.translation_llm_model_entry.get(), "model")
+        self.settings_manager.update_setting("translation_llm", float(self.translation_llm_temp_entry.get()), "temperature")
+        self.settings_manager.update_setting("translation_llm", self.translation_llm_system_prompt_textbox.get("1.0", "end-1c"), "system_prompt")
+        
+        self.settings_manager.update_setting("voicevox", self.voicevox_engine_entry.get(), "engine_address")
+        self.settings_manager.update_setting("voicevox", int(self.voicevox_speaker_id_entry.get()), "speaker_id")
+        
+        self.settings_manager.save_settings()
+
+        if self.app_instance:
+            self.app_instance.update_primary_llm_service()
+            self.app_instance.update_translation_llm_service()
+            self.app_instance.update_voicevox_service()
+            self.app_instance.update_status_bar("Settings saved and services updated.")
 
     def _save_and_close(self):
-        self._save_llm_settings(self.primary_llm_widgets, "primary_llm")
-        self._save_llm_settings(self.translation_llm_widgets, "translation_llm")
+        self._save_settings()
+        self.start_close_animation()
 
-        # Voicevox
-        self.settings_manager.update_setting("voicevox", self.voicevox_engine_address_entry.get().strip(), "engine_address")
-        
-        selected_speaker_value = self.voicevox_speaker_id_combobox.get()
-        speaker_id_to_save = None
-        if selected_speaker_value in self.speaker_name_to_id_map: # Check if it's a display name
-            speaker_id_to_save = self.speaker_name_to_id_map[selected_speaker_value]
-        else: # Assume it's a manually entered ID
-            try:
-                speaker_id_to_save = int(selected_speaker_value)
-            except ValueError:
-                # This case should ideally be handled with validation before saving,
-                # or by not saving if the value is invalid and not in the map.
-                # For now, if it's not in map and not int, it might not save or save incorrectly.
-                # The `SettingsManager` expects an int for speaker_id.
-                print(f"Warning: Speaker ID '{selected_speaker_value}' is not a recognized format or valid ID. May not save correctly.")
-                # Attempt to use current_saved_speaker_id if available and valid, otherwise skip update
-                if hasattr(self, 'current_saved_speaker_id') and isinstance(self.current_saved_speaker_id, int):
-                    speaker_id_to_save = self.current_saved_speaker_id # Fallback to last known good ID
-                else:
-                    speaker_id_to_save = 1 # Default fallback
-        
-        if speaker_id_to_save is not None: # Ensure we have a value
-             self.settings_manager.update_setting("voicevox", int(speaker_id_to_save), "speaker_id")
+    def _test_voicevox(self):
+        if self.app_instance and self.app_instance.voicevox_service:
+            base_url = self.voicevox_engine_entry.get()
+            speaker_id = int(self.voicevox_speaker_id_entry.get())
+            test_service = VoicevoxService(base_url=base_url, speaker_id=speaker_id)
+            available, message = test_service.is_engine_available(base_url)
             
-        # Appearance
-        self.settings_manager.update_setting("appearance", self.appearance_theme_segmented_button.get().lower(), "theme")
-        self.settings_manager.update_setting("appearance", self.appearance_font_size_optionmenu.get().lower(), "font_size")
-        
-        # Voice Mode
-        voice_mode_on = self.general_voice_mode_switch.get() == 1
-        self.settings_manager.update_setting("voice_mode_on", voice_mode_on)
-        
-        # Apply theme immediately
-        new_theme = self.appearance_theme_segmented_button.get().lower()
-        current_mode = ctk.get_appearance_mode().lower()
-        if new_theme == "system":
-            if current_mode != "system": ctk.set_appearance_mode("System")
-        elif new_theme != current_mode:
-             ctk.set_appearance_mode(new_theme)
-
-        # Update app services and state
-        if self.app:
-            self.app.update_primary_llm_service()
-            self.app.update_translation_llm_service() 
-            self.app.update_voicevox_service() 
-            self.app.is_voice_mode_on = voice_mode_on # Update app's flag
-            if hasattr(self.app, 'update_voice_mode_toggle_button_text'):
-                 self.app.update_voice_mode_toggle_button_text() 
-            if hasattr(self.app, '_apply_voice_mode_theme'):
-                self.app._apply_voice_mode_theme()
-
-        self.destroy()
-
-class ConversationBubble(ctk.CTkFrame):
-    def __init__(self, parent, message_text, role, max_width, 
-                 is_primary_assistant_response=False, app_instance=None, translated_text_for_replay=None):
-        super().__init__(parent, corner_radius=10, fg_color="transparent") # Outer bubble transparent
-        
-        self.role = role
-        self.app_instance = app_instance # For calling replay_audio
-        self.translated_text_for_replay = translated_text_for_replay
-
-        # Determine bubble color and text alignment based on role
-        if role == "user":
-            bubble_fg_color = ("#3B8ED0", "#1F6AA5") # Default CTk blue
-            text_anchor = "e"
-            pack_anchor = "e"
-            padx_outer = (50, 10) # Left padding to push to right
-        elif role == "assistant":
-            bubble_fg_color = ("#707070", "#505050") # Greyish
-            text_anchor = "w"
-            pack_anchor = "w"
-            padx_outer = (10, 50) # Right padding to push to left
-        elif role == "translation":
-            bubble_fg_color = ("#606060", "#404040") # Darker Greyish for translation
-            text_anchor = "w"
-            pack_anchor = "w"
-            padx_outer = (25, 65) # Indent more than assistant, less than user
-        else: # Error or other
-            bubble_fg_color = ("#C00000", "#800000") # Reddish for errors
-            text_anchor = "w"
-            pack_anchor = "w"
-            padx_outer = (10,50)
-
-        # Inner frame for actual bubble appearance and content
-        inner_frame = ctk.CTkFrame(self, fg_color=bubble_fg_color, corner_radius=10)
-        
-        # Configure inner_frame to align left or right within the transparent outer bubble
-        # The outer bubble will fill 'x', inner_frame will not expand to fill outer.
-        if pack_anchor == "e":
-            inner_frame.pack(anchor="e", padx=0, pady=0) # No internal padding for inner frame relative to outer
+            if available:
+                success, audio_data, error_msg = test_service.generate_and_get_audio_data("テスト。")
+                if success:
+                    threading.Thread(target=test_service.play_audio_bytes, args=(audio_data,), daemon=True).start()
+                    show_info_dialog(self, "Voicevox Test", "Test audio should be playing.")
+                else:
+                    show_critical_error_dialog(self, "Voicevox Test Error", f"Failed to generate test audio: {error_msg}")
+            else:
+                show_critical_error_dialog(self, "Voicevox Test Error", f"Engine not available: {message}")
         else:
-            inner_frame.pack(anchor="w", padx=0, pady=0)
+            show_critical_error_dialog(self, "Voicevox Test Error", "Voicevox service not initialized in main app.")
 
-        content_frame = ctk.CTkFrame(inner_frame, fg_color="transparent") # Holds label and button
-        content_frame.pack(padx=10, pady=5, fill="x", expand=True)
+    def _confirm_clear_conversation(self):
+        ConfirmationDialog(self, "Clear Conversation?", 
+                           "Are you sure you want to clear the conversation history? This cannot be undone.",
+                           lambda: self.app_instance.clear_conversation() if self.app_instance else None)
 
-        message_label = ctk.CTkLabel(
-            content_frame, 
-            text=message_text, 
-            wraplength=max_width * 0.75, # Adjust wraplength
-            justify="left" if text_anchor == "w" else "right",
-            anchor=text_anchor
-        )
-        message_label.pack(side="left", fill="x", expand=True)
-
-        if role == "assistant" and is_primary_assistant_response and app_instance and app_instance.is_voice_mode_on:
-            button_state = "normal" if self.translated_text_for_replay else "disabled"
-            button_command = (lambda: app_instance.replay_audio(self.translated_text_for_replay)) \
-                             if self.translated_text_for_replay else None
-            play_audio_button = ctk.CTkButton(
-                content_frame, text="🔊", width=28, height=28, command=button_command, state=button_state
-            )
-            play_audio_button.pack(side="right", padx=(5,0), fill="none", expand=False)
-        
-        # The outer frame uses padx_outer to control its own alignment on the scrollable frame.
-        self.pack_padx_outer = padx_outer
-
-
-def create_top_control_bar(parent_frame, app, settings_manager):
-    top_bar = ctk.CTkFrame(parent_frame)
-
-    settings_button = ctk.CTkButton(top_bar, text="Settings", command=app.open_settings_panel)
-    settings_button.pack(side="left", padx=5, pady=5)
+    def _confirm_reset_settings(self):
+        ConfirmationDialog(self, "Reset Settings?", 
+                           "Are you sure you want to reset ALL settings to their defaults? The application will close.",
+                           self._execute_reset_settings)
     
-    clear_button = ctk.CTkButton(top_bar, text="Clear Conversation", command=app.clear_conversation)
-    clear_button.pack(side="left", padx=5, pady=5)
+    def _execute_reset_settings(self):
+        self.settings_manager.reset_to_defaults()
+        self.settings_manager.save_settings()
+        if self.app_instance:
+            show_info_dialog(self.app_instance, "Settings Reset", "Settings have been reset to default. Please restart the application.")
+            self.app_instance.destroy() 
+        else:
+            self.destroy()
 
-    app_name_label = ctk.CTkLabel(top_bar, text="Chat Application")
-    app_name_label.pack(side="left", expand=True, fill="x", padx=5, pady=5)
-    
-    app.voice_mode_toggle_button = ctk.CTkButton(
-        top_bar, text="Voice: Off", command=app.toggle_voice_mode_globally
-    )
-    app.voice_mode_toggle_button.pack(side="right", padx=5, pady=5)
-
-    theme_cycle_button = ctk.CTkButton(top_bar, text="Cycle Theme", command=app.cycle_theme)
-    theme_cycle_button.pack(side="right", padx=5, pady=5)
-
-    copy_last_ai_button = ctk.CTkButton(top_bar, text="Copy Last AI", command=app.copy_last_ai_response)
-    copy_last_ai_button.pack(side="right", padx=5, pady=5)
-    return top_bar
-
-def _create_appearance_tab(self, tab_frame): # In SettingsPanel Class
-    tab_frame.grid_columnconfigure(1, weight=1)
-
-    ctk.CTkLabel(tab_frame, text="Theme:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-    self.appearance_theme_segmented_button = ctk.CTkSegmentedButton(
-        tab_frame, 
-        values=["Light", "Dark", "System"],
-        command=lambda value: self.app.apply_theme_from_settings_panel(value) # Pass the selected value
-    )
-    self.appearance_theme_segmented_button.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
-
-    ctk.CTkLabel(tab_frame, text="Font Size:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-    self.appearance_font_size_optionmenu = ctk.CTkOptionMenu(tab_frame, values=["Small", "Medium", "Large"])
-    self.appearance_font_size_optionmenu.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-    
-    # This part should already exist from previous steps, ensure it's called
-    if hasattr(self, '_create_general_settings_section'):
-        self._create_general_settings_section(tab_frame) 
-    else: # Should ideally not happen if class is correctly structured
-        print("Warning: _create_general_settings_section method missing in SettingsPanel")
-
-    if hasattr(self, '_load_appearance_settings'):
-        self._load_appearance_settings()
-    else:
-        print("Warning: _load_appearance_settings method missing in SettingsPanel")
-
-# Replace the existing _create_appearance_tab method in SettingsPanel
-SettingsPanel._create_appearance_tab = _create_appearance_tab
-
-
-def create_main_content_area(parent_frame, app):
-    app.conversation_scroll_frame = ctk.CTkScrollableFrame(parent_frame)
-    app.conversation_scroll_frame.pack(expand=True, fill="both", padx=5, pady=5)
-    if hasattr(app.conversation_scroll_frame, '_parent_canvas'): # Ensure canvas exists
-        app.conversation_scroll_frame._scrollbar.configure(command=app.conversation_scroll_frame._parent_canvas.yview)
-    return app.conversation_scroll_frame
-
-def create_input_area(parent_frame, app):
-    input_frame = ctk.CTkFrame(parent_frame)
-    input_frame.grid_columnconfigure(0, weight=1) # Make textbox expand
-
-    app.message_input_textbox = ctk.CTkTextbox(input_frame, height=100) 
-    app.message_input_textbox.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-
-    app.send_button = ctk.CTkButton(input_frame, text="Send", command=app.on_send_message_click)
-    app.send_button.grid(row=0, column=1, padx=5, pady=5, sticky="e")
-    return input_frame
-
-def create_status_bar(parent_frame):
-    status_bar = ctk.CTkFrame(parent_frame, height=30) # Give it a bit of height
-    status_bar.pack_propagate(False) # Prevent label from shrinking it
-    
-    status_label = ctk.CTkLabel(status_bar, text="Status: Ready")
-    status_label.pack(side="left", padx=10, pady=5) # Add some padding
-    return status_bar
-
-# This function should be part of gui_elements.py as per current subtask.
-def show_critical_error_dialog(parent_window, title: str, message: str):
-    dialog = ctk.CTkToplevel(parent_window)
+# --- Utility Dialogs ---
+def show_critical_error_dialog(parent, title, message):
+    dialog = ctk.CTkToplevel(parent)
     dialog.title(title)
-    dialog.transient(parent_window) 
-    dialog.grab_set() 
+    dialog.geometry("400x150")
+    dialog.transient(parent)
+    dialog.attributes("-topmost", True)
+    dialog.grab_set()
+    label = ctk.CTkLabel(dialog, text=message, wraplength=380)
+    label.pack(padx=20, pady=20, expand=True, fill="both")
+    ok_button = ctk.CTkButton(dialog, text="OK", command=dialog.destroy)
+    ok_button.pack(pady=10)
+    dialog.wait_window()
 
-    dialog_width = 400
-    dialog_height = 170 # Increased height for better text display
-    
-    # Center on parent
-    parent_x = parent_window.winfo_x()
-    parent_y = parent_window.winfo_y()
-    parent_width = parent_window.winfo_width()
-    parent_height = parent_window.winfo_height()
-    x = parent_x + (parent_width // 2) - (dialog_width // 2)
-    y = parent_y + (parent_height // 2) - (dialog_height // 2)
-    
-    dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-    dialog.resizable(False, False)
+def show_info_dialog(parent, title, message):
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("300x150")
+    dialog.transient(parent)
+    dialog.attributes("-topmost", True)
+    dialog.grab_set()
+    label = ctk.CTkLabel(dialog, text=message, wraplength=280)
+    label.pack(padx=20, pady=20, expand=True, fill="both")
+    ok_button = ctk.CTkButton(dialog, text="OK", command=dialog.destroy)
+    ok_button.pack(pady=10)
+    dialog.wait_window()
 
-    message_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-    message_frame.pack(padx=20, pady=20, expand=True, fill="both")
-    
-    icon_label = ctk.CTkLabel(message_frame, text="⚠️", font=("Segoe UI Emoji", 24)) # Example with emoji
-    icon_label.pack(side="left", padx=(0,10), anchor="center")
+class ConfirmationDialog(ctk.CTkToplevel):
+    def __init__(self, parent, title, message, command_on_yes):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.attributes("-topmost", True)
+        self.grab_set()
 
-    message_label = ctk.CTkLabel(message_frame, text=message, wraplength=dialog_width - 80, justify="left")
-    message_label.pack(side="left", expand=True, fill="both", anchor="center")
+        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_frame.pack(expand=True, fill="both", padx=20, pady=20)
 
-    ok_button = ctk.CTkButton(dialog, text="OK", command=dialog.destroy, width=100)
-    ok_button.pack(pady=(0, 20))
-    
-    dialog.attributes("-topmost", True) 
-    dialog.lift() 
-    dialog.focus_force() 
-    
-    parent_window.wait_window(dialog) # Make it modal
+        label = ctk.CTkLabel(self.main_frame, text=message, wraplength=300)
+        label.pack(pady=(0,20), expand=True, fill="x")
+
+        buttons_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        buttons_frame.pack(fill="x")
+        buttons_frame.columnconfigure((0,1), weight=1)
+
+        self.yes_button = ctk.CTkButton(buttons_frame, text="Yes", command=lambda: self._action_and_close(command_on_yes), width=100)
+        self.yes_button.grid(row=0, column=0, padx=(0,5), sticky="e")
+
+        self.no_button = ctk.CTkButton(buttons_frame, text="No", command=self.destroy, width=100, fg_color=("gray60", "gray25"))
+        self.no_button.grid(row=0, column=1, padx=(5,0), sticky="w")
+        
+        self.after(100, self._center_window) 
+        self.wait_window()
+
+    def _center_window(self):
+        try:
+            self.update_idletasks()
+            parent_x = self.master.winfo_x()
+            parent_y = self.master.winfo_y()
+            parent_width = self.master.winfo_width()
+            parent_height = self.master.winfo_height()
+            
+            dialog_width = self.winfo_width()
+            dialog_height = self.winfo_height()
+            
+            x = parent_x + (parent_width - dialog_width) // 2
+            y = parent_y + (parent_height - dialog_height) // 2
+            
+            self.geometry(f"+{x}+{y}")
+        except Exception as e:
+            print(f"Error centering confirmation dialog: {e}")
+
+    def _action_and_close(self, command):
+        if command:
+            command()
+        self.destroy()
+```

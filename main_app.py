@@ -1,420 +1,560 @@
 import customtkinter as ctk
-from gui_elements import show_critical_error_dialog 
-import gui_elements # Keep for other gui_elements access
+import tkinter as tk 
+import threading
+import json 
+import os 
+
+import gui_elements
 from settings_manager import SettingsManager
 from llm_services import LLMService
 from voicevox_service import VoicevoxService
-import threading
 import pyperclip 
-import os
 
-        self.title("Voice Assistant Chat")
-        self.geometry("1000x700")
+class App(ctk.CTk):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.title("Advanced AI LLM Chatbox - Bento UI")
+        self.geometry("1200x800")
+
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Cell attributes
+        self.chat_history_cell = None
+        self.message_input_cell = None
+        self.voice_mode_cell = None
+        self.primary_llm_quick_adjust_cell = None
+        self.translation_llm_status_cell = None
+        self.voicevox_status_cell = None
+        self.settings_info_cell = None
+        self.status_bar_cell = None 
         
+        # UI Element attributes
+        self.conversation_scroll_frame = None 
+        self.message_input_textbox = None
+        self.send_button = None
+        self.status_label = None 
+        self.voice_mode_toggle_button = None
+        self.settings_button = None
+        self.dimmer_frame = None # For settings panel dimming
+
+        # Attributes for Primary LLM Quick Adjust Cell (B2)
+        self.primary_llm_model_label = None
+        self.primary_llm_temp_value_label = None
+        self.primary_llm_temp_slider = None
+        self.primary_llm_prompt_status_label = None
+
+        # Attributes for Translation LLM Status Cell (B3)
+        self.translation_llm_model_label = None
+        self.translation_llm_prompt_status_label = None
+
+        # Attributes for Voicevox Engine Status Cell (C1)
+        self.voicevox_engine_status_display_label = None
+
+
         self.settings_manager = SettingsManager()
-        self.settings_panel_window = None
-        
+
         self.primary_llm_service = None
-        self.update_primary_llm_service()
-
-        self.translation_llm_service = None 
-        self.update_translation_llm_service()
-
-        self.voicevox_service = None 
-        self.update_voicevox_service()
+        self.translation_llm_service = None
+        self.voicevox_service = None
         
-        self.is_voice_mode_on = self.settings_manager.get_setting("voice_mode_on")
-        self.voice_mode_toggle_button = None # Will be assigned by gui_elements
+        self.initialize_ui() 
+
+        self.update_primary_llm_service() 
+        self.update_translation_llm_service()
+        self.update_voicevox_service() 
+        
+        self._load_primary_llm_quick_adjust_values()
+        self._load_translation_llm_status_values() 
+        self.update_voicevox_engine_status_display() 
+
 
         self.conversation_history = []
         self.message_widgets = [] 
-        self.conversation_scroll_frame = None 
+
+        self.sent_message_history = []
+        self.sent_message_history_index = -1
+
+        self.is_voice_mode_on = self.settings_manager.get_setting("voice_mode_on")
+        self.settings_panel_window = None
+
 
         initial_theme = self.settings_manager.get_setting("appearance", "theme")
-        if initial_theme and initial_theme.lower() in ["light", "dark", "system"]:
-             ctk.set_appearance_mode(initial_theme.lower())
-        else:
-             ctk.set_appearance_mode("system")
-
-        self.initialize_ui()
-
-    def update_primary_llm_service(self):
-        primary_llm_settings = self.settings_manager.get_setting("primary_llm")
-        if primary_llm_settings:
-            self.primary_llm_service = LLMService(
-                api_base_url=primary_llm_settings.get("api_base_url"),
-                api_key=primary_llm_settings.get("api_key"),
-                model=primary_llm_settings.get("model"),
-                temperature=primary_llm_settings.get("temperature"),
-                system_prompt=primary_llm_settings.get("system_prompt")
-            )
-            print("Primary LLM Service Updated/Initialized.")
-            if hasattr(self, 'status_label') and self.status_label and not self.primary_llm_service.is_configured():
-                self.update_status_bar("Primary LLM not fully configured in Settings.", is_error=True)
-
-    def update_translation_llm_service(self):
-        translation_llm_settings = self.settings_manager.get_setting("translation_llm")
-        if translation_llm_settings:
-            self.translation_llm_service = LLMService(
-                api_base_url=translation_llm_settings.get("api_base_url"),
-                api_key=translation_llm_settings.get("api_key"),
-                model=translation_llm_settings.get("model"),
-                temperature=translation_llm_settings.get("temperature"),
-                system_prompt=translation_llm_settings.get("system_prompt")
-            )
-            print("Translation LLM Service Updated/Initialized.")
-            if hasattr(self, 'status_label') and self.status_label and not self.translation_llm_service.is_configured():
-                self.update_status_bar("Translation LLM not fully configured in Settings.", is_error=True)
-
-
-    def update_voicevox_service(self):
-        voicevox_settings = self.settings_manager.get_setting("voicevox")
-        if voicevox_settings:
-            engine_url = voicevox_settings.get("engine_address")
-            speaker_id = voicevox_settings.get("speaker_id", 1)
-            if self.voicevox_service:
-                self.voicevox_service.update_config(engine_url, speaker_id)
-            else:
-                self.voicevox_service = VoicevoxService(engine_url, speaker_id)
-            print(f"Voicevox Service Updated/Initialized. URL: {engine_url}, Speaker ID: {speaker_id}")
-            if hasattr(self, 'status_label') and self.status_label and not self.voicevox_service.is_configured():
-                self.update_status_bar("Voicevox not fully configured in Settings.", is_error=True)
-    
-    def update_status_bar(self, message: str, is_error: bool = False):
-        if not hasattr(self, 'status_label') or not self.status_label:
-            # print(f"Status bar not initialized or available. Message: {message}") # Avoid print
-            return
+        if initial_theme:
+            theme_to_apply = initial_theme.lower()
+            if theme_to_apply not in ["light", "dark", "system"]:
+                theme_to_apply = "system"
+            ctk.set_appearance_mode(theme_to_apply.capitalize() if theme_to_apply == "system" else theme_to_apply)
         
-        prefix = "Error: " if is_error else "Status: "
-        full_message = f"{prefix}{str(message)}"
-        
-        # Use theme colors if possible, otherwise fallback
-        label_theme = ctk.ThemeManager.theme.get("CTkLabel", {})
-        default_text_color = label_theme.get("text_color", ("black", "white")) # Default if not in theme
-        
-        text_color_actual = "red" if is_error else default_text_color
-        # If default_text_color from theme is a tuple (light_mode, dark_mode)
-        if isinstance(text_color_actual, tuple) and len(text_color_actual) == 2:
-            current_mode = ctk.get_appearance_mode()
-            text_color_actual = text_color_actual[1] if current_mode == "Dark" else text_color_actual[0]
-
-        self.status_label.configure(text=full_message, text_color=text_color_actual)
-        # print(full_message) # Avoid redundant print
-
-    def set_input_active(self, is_active: bool):
-        if hasattr(self, 'message_input_textbox') and self.message_input_textbox:
-            self.message_input_textbox.configure(state="normal" if is_active else "disabled")
-        
-        if hasattr(self, 'send_button') and self.send_button:
-            self.send_button.configure(state="normal" if is_active else "disabled")
-            self.send_button.configure(text="Send" if is_active else "Processing...")
+        if self.conversation_scroll_frame: 
+            self._apply_voice_mode_theme() 
 
     def initialize_ui(self):
-        self.main_frame = ctk.CTkFrame(self)
-        self.main_frame.pack(expand=True, fill="both", padx=10, pady=10)
+        self.bento_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.bento_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        self.top_control_bar = gui_elements.create_top_control_bar(self.main_frame, app=self, settings_manager=self.settings_manager)
-        self.top_control_bar.pack(side="top", fill="x")
+        self.bento_container.grid_columnconfigure(0, weight=3) 
+        self.bento_container.grid_columnconfigure(1, weight=3) 
+        self.bento_container.grid_columnconfigure(2, weight=2) 
+        self.bento_container.grid_columnconfigure(3, weight=2) 
+        self.bento_container.grid_rowconfigure(0, weight=2) 
+        self.bento_container.grid_rowconfigure(1, weight=2) 
+        self.bento_container.grid_rowconfigure(2, weight=1) 
 
-        self.conversation_scroll_frame = gui_elements.create_main_content_area(self.main_frame, app=self)
-        # conversation_scroll_frame is already packed in create_main_content_area
-
-        self.input_area = gui_elements.create_input_area(self.main_frame, app=self) # app.send_button and app.message_input_textbox are set here
-        self.input_area.pack(side="bottom", fill="x", padx=10, pady=10)
+        self.cell_definitions = [
+            {"name": "Chat History", "row":0, "col":0, "rowspan":2, "colspan":2, "attr": "chat_history_cell"},
+            {"name": "Message Input", "row":2, "col":0, "rowspan":1, "colspan":2, "attr": "message_input_cell"},
+            {"name": "Voice Mode", "row":0, "col":2, "attr": "voice_mode_cell"},
+            {"name": "Primary LLM Quick Adjust", "row":1, "col":2, "attr": "primary_llm_quick_adjust_cell"},
+            {"name": "Translation LLM Status", "row":2, "col":2, "attr": "translation_llm_status_cell"},
+            {"name": "Voicevox Engine Status", "row":0, "col":3, "attr": "voicevox_status_cell"},
+            {"name": "Settings & Info", "row":1, "col":3, "attr": "settings_info_cell"},
+            {"name": "Status Bar", "row":2, "col":3, "attr": "status_bar_cell"}
+        ]
         
-        status_bar_frame = gui_elements.create_status_bar(self.main_frame)
-        status_bar_frame.pack(side="bottom", fill="x")
-        self.status_label = status_bar_frame.winfo_children()[0] 
-        
-        self.update_voice_mode_toggle_button_text() # Set initial button text/color
-        self._apply_voice_mode_theme() # Apply initial theme accents
-        self.update_status_bar("Ready.") # Initial status
+        self._reveal_cells_sequentially()
 
-    def add_message_to_display(self, message_content, role, translated_text_for_replay=None):
-        if not self.conversation_scroll_frame:
-            print("Error: Conversation scroll frame not initialized.")
+
+    def _reveal_cells_sequentially(self, cell_index=0):
+        if cell_index >= len(self.cell_definitions):
+            self._populate_critical_cells_after_reveal()
+            
+            self.update_primary_llm_service() 
+            self.update_translation_llm_service()
+            self.update_voicevox_service()
+
+            if hasattr(self, '_load_primary_llm_quick_adjust_values'): self._load_primary_llm_quick_adjust_values()
+            if hasattr(self, '_load_translation_llm_status_values'): self._load_translation_llm_status_values()
+            if hasattr(self, 'update_voicevox_engine_status_display'): self.update_voicevox_engine_status_display()
+            
+            if self.conversation_scroll_frame: 
+               self._apply_voice_mode_theme()
+            
+            self.update_status_bar("All UI cells revealed and initialized.")
             return
 
-        self.conversation_scroll_frame.update_idletasks() 
-        max_bubble_width = self.conversation_scroll_frame.winfo_width()
-        if max_bubble_width <= 0: max_bubble_width = self.winfo_width() * 0.7 
-
-        is_primary_assistant = (role == "assistant")
-
-        bubble = gui_elements.ConversationBubble(
-            parent=self.conversation_scroll_frame, 
-            message_text=message_content, 
-            role=role, 
-            max_width=max_bubble_width,
-            is_primary_assistant_response=is_primary_assistant,
-            app_instance=self,
-            translated_text_for_replay=translated_text_for_replay if is_primary_assistant else None
+        cell_def = self.cell_definitions[cell_index]
+        created_cell = gui_elements.create_bento_cell(
+            self.bento_container, cell_def["name"], cell_def["row"], cell_def["col"],
+            rowspan=cell_def.get("rowspan", 1), colspan=cell_def.get("colspan", 1)
         )
-        # Packing with appropriate side padding is now handled inside ConversationBubble using self.pack_padx_outer
-        bubble.pack(anchor="w" if role != "user" else "e", padx=bubble.pack_padx_outer, pady=5, fill="x")
+        setattr(self, cell_def["attr"], created_cell) 
+        
+        delay_ms = 50 
+        self.after(delay_ms, lambda: self._reveal_cells_sequentially(cell_index + 1))
+
+    def _populate_critical_cells_after_reveal(self):
+        # A1: Chat History
+        if self.chat_history_cell:
+            for widget in self.chat_history_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Chat History": widget.destroy(); break
+            self.conversation_scroll_frame = ctk.CTkScrollableFrame(self.chat_history_cell, fg_color="transparent")
+            self.conversation_scroll_frame.pack(expand=True, fill="both", padx=5, pady=5)
+
+        # A2: Message Input
+        if self.message_input_cell:
+            for widget in self.message_input_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Message Input": widget.destroy(); break
+            self.message_input_cell.grid_columnconfigure(0, weight=1); self.message_input_cell.grid_columnconfigure(1, weight=0) 
+            self.message_input_cell.grid_rowconfigure(0, weight=1)    
+            self.message_input_textbox = ctk.CTkTextbox(self.message_input_cell, height=70, border_width=1, corner_radius=8)
+            self.message_input_textbox.grid(row=0, column=0, sticky="nsew", padx=(5,5), pady=5)
+            self.send_button = ctk.CTkButton(self.message_input_cell, text="Send", width=70, command=self.on_send_message_click)
+            self.send_button.grid(row=0, column=1, sticky="nse", padx=(0,5), pady=5)
+            if self.message_input_textbox: 
+                self.message_input_textbox.bind("<Up>", self.on_input_arrow_up)
+                self.message_input_textbox.bind("<Down>", self.on_input_arrow_down)
+        
+        # B1: Voice Mode Toggle
+        if self.voice_mode_cell:
+            for widget in self.voice_mode_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Voice Mode": widget.destroy(); break 
+            self.voice_mode_cell.grid_rowconfigure(0, weight=1); self.voice_mode_cell.grid_columnconfigure(0, weight=1) 
+            self.voice_mode_toggle_button = ctk.CTkSwitch(self.voice_mode_cell, text="Voice Output", command=self.toggle_voice_mode_globally, onvalue=True, offvalue=False)
+            self.voice_mode_toggle_button.grid(row=0, column=0, sticky="ew", padx=20, pady=10)
+            self.update_voice_mode_toggle_button_text()
+
+        # B2: Primary LLM Quick Adjust
+        if self.primary_llm_quick_adjust_cell:
+            for widget in self.primary_llm_quick_adjust_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Primary LLM Quick Adjust": widget.destroy(); break
+            self.primary_llm_quick_adjust_cell.grid_columnconfigure(0, weight=1); self.primary_llm_quick_adjust_cell.grid_columnconfigure(1, weight=2)
+            for i in range(4): self.primary_llm_quick_adjust_cell.grid_rowconfigure(i, weight=0)
+            ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="Model:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+            self.primary_llm_model_label = ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="N/A", anchor="w", wraplength=160)
+            self.primary_llm_model_label.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+            ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="Temp:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+            self.primary_llm_temp_value_label = ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="0.0", anchor="w")
+            self.primary_llm_temp_value_label.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+            self.primary_llm_temp_slider = ctk.CTkSlider(self.primary_llm_quick_adjust_cell, from_=0.0, to=1.0, number_of_steps=100, command=self._on_primary_llm_temp_slider_change)
+            self.primary_llm_temp_slider.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0,5))
+            ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="Prompt:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+            self.primary_llm_prompt_status_label = ctk.CTkLabel(self.primary_llm_quick_adjust_cell, text="N/A", anchor="w", wraplength=160)
+            self.primary_llm_prompt_status_label.grid(row=3, column=1, sticky="ew", padx=5, pady=2)
+
+        # B3: Translation LLM Status
+        if self.translation_llm_status_cell:
+            for widget in self.translation_llm_status_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Translation LLM Status": widget.destroy(); break
+            self.translation_llm_status_cell.grid_columnconfigure(0, weight=1); self.translation_llm_status_cell.grid_columnconfigure(1, weight=2)
+            self.translation_llm_status_cell.grid_rowconfigure(0, weight=0); self.translation_llm_status_cell.grid_rowconfigure(1, weight=0)
+            ctk.CTkLabel(self.translation_llm_status_cell, text="Model:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+            self.translation_llm_model_label = ctk.CTkLabel(self.translation_llm_status_cell, text="N/A", anchor="w", wraplength=160)
+            self.translation_llm_model_label.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+            ctk.CTkLabel(self.translation_llm_status_cell, text="Prompt:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+            self.translation_llm_prompt_status_label = ctk.CTkLabel(self.translation_llm_status_cell, text="N/A", anchor="w", wraplength=160)
+            self.translation_llm_prompt_status_label.grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+
+        # C1: Voicevox Engine Status
+        if self.voicevox_status_cell:
+            for widget in self.voicevox_status_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Voicevox Engine Status": widget.destroy(); break
+            self.voicevox_status_cell.grid_columnconfigure(0, weight=1)
+            self.voicevox_status_cell.grid_rowconfigure(0, weight=0); self.voicevox_status_cell.grid_rowconfigure(1, weight=0)
+            ctk.CTkLabel(self.voicevox_status_cell, text="Voicevox Engine:").grid(row=0, column=0, sticky="nw", padx=5, pady=(5,2))
+            self.voicevox_engine_status_display_label = ctk.CTkLabel(self.voicevox_status_cell, text="N/A", anchor="w", wraplength=180)
+            self.voicevox_engine_status_display_label.grid(row=1, column=0, sticky="new", padx=5, pady=(0,5))
+        
+        # C2: Settings & Info
+        if self.settings_info_cell:
+            for widget in self.settings_info_cell.winfo_children():
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Settings & Info": widget.destroy(); break
+            self.settings_info_cell.grid_rowconfigure(0, weight=1); self.settings_info_cell.grid_columnconfigure(0, weight=1) 
+            self.settings_button = ctk.CTkButton(self.settings_info_cell, text="Settings", command=self.open_settings_panel)
+            self.settings_button.grid(row=0, column=0, sticky="ew", padx=20, pady=20)
+
+        # C3: Status Bar
+        if self.status_bar_cell:
+            for widget in self.status_bar_cell.winfo_children(): 
+                if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Status Bar": widget.destroy(); break
+            self.status_bar_cell.grid_rowconfigure(0, weight=1); self.status_bar_cell.grid_columnconfigure(0, weight=1)
+            self.status_label = ctk.CTkLabel(self.status_bar_cell, text="", anchor="w") 
+            self.status_label.grid(row=0, column=0, sticky="nsew", padx=10, pady=2)
+
+
+    def _load_primary_llm_quick_adjust_values(self):
+        if not all(hasattr(self, attr) and getattr(self, attr) is not None and getattr(self, attr).winfo_exists()
+                   for attr in ['primary_llm_model_label', 'primary_llm_temp_slider', 
+                                'primary_llm_temp_value_label', 'primary_llm_prompt_status_label']):
+            return 
+        config = self.settings_manager.get_setting("primary_llm")
+        if config:
+            self.primary_llm_model_label.configure(text=str(config.get("model", "N/A")))
+            temp_value = config.get("temperature", 0.0); temp = float(temp_value) if isinstance(temp_value, (int, float, str)) and str(temp_value).replace('.', '', 1).isdigit() else 0.0
+            self.primary_llm_temp_slider.set(temp); self.primary_llm_temp_value_label.configure(text=f"{temp:.2f}")
+            prompt = config.get("system_prompt", ""); prompt_snippet = (prompt[:25] + "...") if len(prompt) > 28 else prompt 
+            self.primary_llm_prompt_status_label.configure(text=prompt_snippet if prompt else "Default")
+        else: 
+            self.primary_llm_model_label.configure(text="N/A"); self.primary_llm_temp_value_label.configure(text="0.0")
+            self.primary_llm_temp_slider.set(0.0); self.primary_llm_prompt_status_label.configure(text="N/A")
+
+    def _on_primary_llm_temp_slider_change(self, value):
+        if not all(hasattr(self, attr) and getattr(self, attr) is not None and getattr(self,attr).winfo_exists()
+                   for attr in ['primary_llm_temp_value_label', 'settings_manager']): return
+        temp = round(float(value), 2)
+        self.primary_llm_temp_value_label.configure(text=f"{temp:.2f}")
+        self.settings_manager.update_setting("primary_llm", temp, sub_key="temperature")
+        self.update_primary_llm_service() 
+
+    def _load_translation_llm_status_values(self):
+        if not all(hasattr(self, attr) and getattr(self, attr) is not None and getattr(self, attr).winfo_exists()
+                   for attr in ['translation_llm_model_label', 'translation_llm_prompt_status_label']): return
+        config = self.settings_manager.get_setting("translation_llm")
+        if config and self.translation_llm_service and self.translation_llm_service.is_configured():
+            self.translation_llm_model_label.configure(text=str(config.get("model", "N/A")))
+            prompt = config.get("system_prompt", "")
+            if "translate" in prompt.lower() and "japanese" in prompt.lower(): self.translation_llm_prompt_status_label.configure(text="Translates to Japanese")
+            elif prompt: self.translation_llm_prompt_status_label.configure(text=(prompt[:30] + "...") if len(prompt) > 33 else prompt)
+            else: self.translation_llm_prompt_status_label.configure(text="Default")
+        else: 
+            self.translation_llm_model_label.configure(text="N/A"); self.translation_llm_prompt_status_label.configure(text="Not Configured")
+
+    def update_primary_llm_service(self):
+        config = self.settings_manager.get_setting("primary_llm")
+        if config and config.get("api_base_url") and config.get("api_key"):
+            self.primary_llm_service = LLMService(api_base_url=config.get("api_base_url"), api_key=config.get("api_key"), model=config.get("model"), temperature=config.get("temperature"), system_prompt=config.get("system_prompt"))
+        else: self.primary_llm_service = None
+        if hasattr(self, 'primary_llm_model_label') and self.primary_llm_model_label and self.primary_llm_model_label.winfo_exists(): self._load_primary_llm_quick_adjust_values()
+        elif hasattr(self, 'status_label') and self.status_label and self.status_label.winfo_exists():
+            if self.primary_llm_service and self.primary_llm_service.is_configured(): self.update_status_bar("Primary LLM service configured.")
+            else: self.update_status_bar("Primary LLM not fully configured.", is_error=True)
+
+    def update_translation_llm_service(self):
+        config = self.settings_manager.get_setting("translation_llm")
+        if config and config.get("api_base_url") and config.get("api_key"):
+            self.translation_llm_service = LLMService(api_base_url=config.get("api_base_url"), api_key=config.get("api_key"), model=config.get("model"), temperature=config.get("temperature"), system_prompt=config.get("system_prompt"))
+        else: self.translation_llm_service = None
+        if hasattr(self, 'translation_llm_model_label') and self.translation_llm_model_label and self.translation_llm_model_label.winfo_exists(): self._load_translation_llm_status_values()
+
+    def update_voicevox_service(self):
+        config = self.settings_manager.get_setting("voicevox")
+        if config and config.get("engine_address"):
+            self.voicevox_service = VoicevoxService(base_url=config.get("engine_address"), speaker_id=int(config.get("speaker_id", 1)))
+        else: self.voicevox_service = None
+        if hasattr(self, 'voicevox_engine_status_display_label') and self.voicevox_engine_status_display_label: self.update_voicevox_engine_status_display()
+
+    def update_voicevox_engine_status_display(self):
+        if not hasattr(self, 'voicevox_engine_status_display_label') or not self.voicevox_engine_status_display_label or not self.voicevox_engine_status_display_label.winfo_exists(): return 
+        default_text_color = ("black", "white") 
+        try:
+            text_color_tuple = ctk.ThemeManager.theme["CTkLabel"]["text_color"]
+            default_text_color = text_color_tuple[1] if ctk.get_appearance_mode() == "Dark" else text_color_tuple[0]
+        except Exception: pass 
+        if self.voicevox_service and self.voicevox_service.is_configured(): self.voicevox_engine_status_display_label.configure(text="Configured", text_color=default_text_color)
+        else: self.voicevox_engine_status_display_label.configure(text="Not Configured", text_color="orange")
+
+    def add_dimmer(self):
+        if not hasattr(self, 'dimmer_frame') or self.dimmer_frame is None or not self.dimmer_frame.winfo_exists():
+            # Dimmer should be on top of bento_container, but below the settings panel.
+            # Create it on `self` (the main app window) to ensure it can overlay everything effectively.
+            self.dimmer_frame = ctk.CTkFrame(self, fg_color=("black", "black"), corner_radius=0) # Solid black
+            self.dimmer_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            # Attempt to set window attribute for transparency. This is platform-dependent.
+            # For a more reliable cross-platform "dim" effect without true alpha on child frames,
+            # a very dark color is used. Actual transparency might not be achieved on all systems for a frame.
+            try:
+                 self.attributes("-alpha", 0.75) # This makes the *entire app window* transparent
+                 # So, this is not what we want for a dimmer frame within the app.
+                 # The best we can do with a CTkFrame is a dark color.
+                 # True alpha blending for a child frame is complex.
+                 # Revert to a dark color for the frame.
+                 self.dimmer_frame.configure(fg_color=("gray10", "gray10")) # Dark semi-opaque color
+            except tk.TclError: # If -alpha is not supported (e.g. wayland without proper compositor)
+                 print("Alpha transparency for dimmer not supported, using solid dark color.")
+                 self.dimmer_frame.configure(fg_color=("gray10", "gray10")) # Fallback to dark solid color
+        self.dimmer_frame.lift()
+
+
+    def remove_dimmer(self):
+        if hasattr(self, 'dimmer_frame') and self.dimmer_frame is not None and self.dimmer_frame.winfo_exists():
+            self.dimmer_frame.destroy()
+            self.dimmer_frame = None
+            # If we made the main window transparent, revert it.
+            # However, the current dimmer logic uses a Frame, not main window transparency.
+            # So, this line might not be needed unless the strategy for add_dimmer changes.
+            # try: self.attributes("-alpha", 1.0) # Fully opaque
+            # except tk.TclError: pass 
+    
+    def open_settings_panel(self):
+        if self.settings_panel_window is None or not self.settings_panel_window.winfo_exists():
+            self.add_dimmer() 
+            self.settings_panel_window = gui_elements.SettingsPanel(self, settings_manager=self.settings_manager, app=self)
+            if self.dimmer_frame: 
+                 self.settings_panel_window.lift(aboveThis=self.dimmer_frame)
+            else: 
+                 self.settings_panel_window.lift()
+            self.settings_panel_window.animate_open() 
+            self.update_status_bar("Settings panel opened.")
+        else:
+            self.settings_panel_window.deiconify()
+            self.add_dimmer() 
+            self.settings_panel_window.lift(aboveThis=self.dimmer_frame if self.dimmer_frame else None)
+            if hasattr(self.settings_panel_window, 'animate_open'):
+                 self.settings_panel_window.animate_open() 
+            else:
+                 self.settings_panel_window.grab_set() 
             
-        self.message_widgets.append(bubble)
-        self.after(100, self._scroll_to_bottom) # Increased delay slightly
-
-    def _scroll_to_bottom(self):
-        if self.conversation_scroll_frame:
-            self.conversation_scroll_frame._parent_canvas.yview_moveto(1.0)
-
     def on_send_message_click(self):
+        if not self.message_input_textbox: 
+            self.update_status_bar("Error: Message input UI not ready.", is_error=True)
+            return
         user_message = self.message_input_textbox.get("1.0", "end-1c").strip()
         if not user_message: return
-
-        self.set_input_active(False) # Now uses the new method
+        self.set_input_active(False)
+        self.update_status_bar("Processing message...")
+        if not self.sent_message_history or (self.sent_message_history and user_message != self.sent_message_history[-1]):
+            self.sent_message_history.append(user_message)
+        self.sent_message_history_index = len(self.sent_message_history)
         self.message_input_textbox.delete("1.0", "end")
         self.conversation_history.append({"role": "user", "content": user_message})
         self.add_message_to_display(user_message, "user")
-        
-        self.update_status_bar("Processing message...") # Standardized message
         threading.Thread(target=self._process_message_thread, args=(user_message,), daemon=True).start()
 
     def _process_message_thread(self, user_message):
-        # Use service's is_configured() method
+        primary_response_text, translated_text_for_response, voice_status_for_response, has_critical_error = None, None, None, False
         if not self.primary_llm_service or not self.primary_llm_service.is_configured():
-            self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Primary LLM Error", "Primary LLM not configured. Please check API Key and URL in Settings."))
-            self.after(0, lambda: self.update_status_bar("Primary LLM not configured.", is_error=True))
-            self.after(0, lambda: self.set_input_active(True)) # Re-enable input
-            return
+            self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Primary LLM Error", "Primary LLM not configured."))
+            primary_response_text, has_critical_error = "Error: Primary LLM not configured.", True
+        else:
+            self.after(0, lambda: self.update_status_bar("Primary LLM: Generating response..."))
+            primary_response_text = self.primary_llm_service.generate_response(user_message)
 
-        self.after(0, lambda: self.update_status_bar("Primary LLM: Generating response..."))
-        primary_response_text = self.primary_llm_service.generate_response(user_message)
-        
-        if primary_response_text.startswith("Error:"):
-            self.after(0, lambda: self._handle_llm_response(primary_response_text, is_error=True))
-            return
-
-        translated_text = None
-        voice_status = None
-
-        if self.is_voice_mode_on:
+        if not has_critical_error and self.is_voice_mode_on and not primary_response_text.startswith("Error:"):
             if not self.translation_llm_service or not self.translation_llm_service.is_configured():
-                self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Translation LLM Error", "Translation LLM not configured for Voice Mode. Please check API Key and URL in Settings."))
-                translated_text = "Error: Translation LLM not configured."
+                translated_text_for_response = "Info: Translation LLM not configured. Skipping translation."
+                self.after(0, lambda: self.update_status_bar(translated_text_for_response, is_error=True))
             else:
                 self.after(0, lambda: self.update_status_bar("Translation LLM: Translating..."))
-                translated_text = self.translation_llm_service.generate_response(primary_response_text)
+                translated_text_for_response = self.translation_llm_service.generate_response(primary_response_text)
 
-                if not translated_text.startswith("Error:"):
-                    if not self.voicevox_service or not self.voicevox_service.is_configured():
-                        self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Voicevox Error", "Voicevox service (engine address) not configured. Please check Settings."))
-                        voice_status = "Error: Voicevox service not configured."
+            if translated_text_for_response and not (translated_text_for_response.startswith("Error:") or translated_text_for_response.startswith("Info:")):
+                if not self.voicevox_service or not self.voicevox_service.is_configured():
+                    voice_status_for_response, _ = "Info: Voicevox service not configured. Skipping audio.", self.after(0, lambda: self.update_status_bar(voice_status_for_response, is_error=True))
+                else:
+                    available, status_msg = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
+                    if not available:
+                        self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Voicevox Error", status_msg))
+                        voice_status_for_response = f"Error: Voicevox engine unavailable. {status_msg}"
                     else:
-                        vv_available, vv_msg = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
-                        if not vv_available:
-                            self.after(0, lambda: gui_elements.show_critical_error_dialog(self, "Voicevox Error", f"Voicevox engine not found or unavailable at {self.voicevox_service.base_url}. Details: {vv_msg}"))
-                            voice_status = f"Error: Voicevox engine unavailable. ({vv_msg})"
+                        self.after(0, lambda: self.update_status_bar("Voicevox: Synthesizing audio..."))
+                        audio_query, error_msg_aq = self.voicevox_service.generate_audio_query(translated_text_for_response)
+                        if error_msg_aq: voice_status_for_response = f"Error (Audio Query): {error_msg_aq}"
                         else:
-                            self.after(0, lambda: self.update_status_bar("Voicevox: Synthesizing audio..."))
-                            query, q_err = self.voicevox_service.generate_audio_query(translated_text)
-                            if q_err: voice_status = f"Voicevox Query Error: {q_err}"
+                            audio_data, error_msg_synth = self.voicevox_service.synthesize_speech_data(audio_query)
+                            if error_msg_synth: voice_status_for_response = f"Error (Synthesis): {error_msg_synth}"
                             else:
-                                audio_data, s_err = self.voicevox_service.synthesize_speech_data(query)
-                                if s_err: voice_status = f"Voicevox Synthesis Error: {s_err}"
-                                else:
-                                    self.after(0, lambda: self.update_status_bar("Voicevox: Playing audio..."))
-                                    threading.Thread(target=self._play_audio_thread, args=(audio_data,), daemon=True).start()
-                                    voice_status = "Audio playback initiated."
-                else: 
-                    voice_status = "Skipping audio due to translation error."
-        
-        self.after(0, lambda: self._handle_llm_response(primary_response_text, translated_text, voice_status))
-        
-    def _play_audio_thread(self, audio_data):
-        success, play_msg = self.voicevox_service.play_audio_bytes(audio_data) # Use tuple
-        self.after(0, lambda: self.update_status_bar(f"Voicevox: {play_msg}", is_error=not success))
-        if success:
-             self.after(2000, lambda: self.update_status_bar("Ready."))
+                                threading.Thread(target=self._play_audio_thread, args=(audio_data, "main"), daemon=True).start()
+                                voice_status_for_response = "Audio playing..."
+            elif translated_text_for_response and (translated_text_for_response.startswith("Error:") or translated_text_for_response.startswith("Info:")):
+                 voice_status_for_response = "Skipping audio due to translation issue."
+        self.after(0, lambda: self._handle_llm_response(primary_response_text, translated_text_for_response, voice_status_for_response, has_critical_error))
 
+    def _play_audio_thread(self, audio_data, context="main"): 
+        self.after(0, lambda: self.update_status_bar(f"Voicevox: Playing audio ({context})..."))
+        success, msg = self.voicevox_service.play_audio_bytes(audio_data)
+        self.after(0, lambda: self.update_status_bar(f"Voicevox: {msg}", is_error=not success))
+        if context == "main" or context == "replay": self.after(0, lambda: self.set_input_active(True))
+        if success and context == "main": self.after(100, lambda: self.update_status_bar("Ready."))
 
-    def _handle_llm_response(self, primary_response, translated_text=None, voice_status=None, is_error=False):
-        final_status = "Ready."
-        is_final_status_error = False
+    def _handle_llm_response(self, primary_response_text, translated_text, voice_status_message, is_critical_error):
+        if not is_critical_error: 
+            self.conversation_history.append({"role": "assistant", "content": primary_response_text})
+            ttfr = translated_text if self.is_voice_mode_on and translated_text and not (translated_text.startswith("Error:") or translated_text.startswith("Info:")) else None
+            self.add_message_to_display(primary_response_text, "assistant", translated_text_for_replay=ttfr)
+        if translated_text: 
+            self.conversation_history.append({"role": "translation", "content": translated_text})
+            self.add_message_to_display(translated_text, "translation")
+        final_status, is_final_status_error = "Ready.", False
+        if is_critical_error: final_status, is_final_status_error = primary_response_text, True
+        elif primary_response_text.startswith("Error:"): final_status, is_final_status_error = primary_response_text, True
+        elif translated_text and (translated_text.startswith("Error:") or translated_text.startswith("Info:")): final_status, is_final_status_error = translated_text, True
+        elif voice_status_message and (voice_status_message.startswith("Error:") or voice_status_message.startswith("Info:")): final_status, is_final_status_error = voice_status_message, True
+        elif voice_status_message and not (voice_status_message == "Audio playing..." or "initiated" in voice_status_message): final_status = voice_status_message
+        if not (self.is_voice_mode_on and voice_status_message == "Audio playing..." and not is_critical_error):
+            self.set_input_active(True); self.update_status_bar(final_status, is_error=is_final_status_error)
 
-        if is_error: # Error from primary LLM service call itself (not just config)
-            self.add_message_to_display(primary_response, "assistant") 
-            final_status = primary_response
-            is_final_status_error = True
-        else: # Primary LLM call was successful
-            self.conversation_history.append({"role": "assistant", "content": primary_response})
-            ttfr = translated_text if (translated_text and not translated_text.startswith("Error:")) else None
-            self.add_message_to_display(primary_response, "assistant", translated_text_for_replay=ttfr)
+    def add_message_to_display(self, message_content, role, translated_text_for_replay=None):
+        if not self.conversation_scroll_frame or not self.conversation_scroll_frame.winfo_exists(): 
+            print(f"Debug: Conv. area not ready. ({role}) {message_content}"); return
+        try:
+            self.conversation_scroll_frame.update_idletasks(); max_bubble_width = self.conversation_scroll_frame.winfo_width()*0.8
+            if max_bubble_width <= 0: max_bubble_width = self.winfo_width()*0.6 
+        except Exception as e: print(f"Error getting scroll frame width: {e}"); max_bubble_width = 500 
+        bubble = gui_elements.ConversationBubble(self.conversation_scroll_frame, message_text=message_content, role=role, max_width=max_bubble_width, is_primary_assistant_response=(role=="assistant"), app_instance=self, translated_text_for_replay=translated_text_for_replay)
+        bubble.pack(anchor="e" if role == "user" else "w", padx=bubble.pack_padx_outer, pady=5, fill="x")
+        self.message_widgets.append(bubble); self.after(10, self._scroll_to_bottom)
 
-            if translated_text:
-                self.conversation_history.append({"role": "translation", "content": translated_text})
-                self.add_message_to_display(translated_text, "translation")
-                if translated_text.startswith("Error:"):
-                    final_status = translated_text # Translation error is the status
-                    is_final_status_error = True
-            
-            if voice_status: 
-                if voice_status.startswith("Error:"):
-                    # Voice error takes precedence if translation was okay or voice error is more specific
-                    final_status = voice_status 
-                    is_final_status_error = True
-                # "Audio playback initiated" is transient; _play_audio_thread handles final status ("Ready." or error)
-                elif not ("initiated" in voice_status or "started" in voice_status):
-                    final_status = voice_status
+    def _scroll_to_bottom(self):
+        if self.conversation_scroll_frame and self.conversation_scroll_frame.winfo_exists(): self.conversation_scroll_frame._parent_canvas.yview_moveto(1.0)
 
-        # Update status bar unless audio playback is just initiated (it will set "Ready." or error later)
-        if not (voice_status and ("initiated" in voice_status or "started" in voice_status)):
-             self.update_status_bar(final_status, is_error=is_final_status_error)
-        
-        self.set_input_active(True) # Re-enable input at the end
-            
     def clear_conversation(self):
-        self.conversation_history.clear()
-        for widget in self.message_widgets: widget.destroy()
-        self.message_widgets.clear()
-        self.update_status_bar("Conversation cleared.") # Standardized
+        self.conversation_history.clear(); [w.destroy() for w in self.message_widgets]; self.message_widgets.clear()
+        self.update_status_bar("Conversation cleared.")
 
     def copy_last_ai_response(self):
-        last_ai_msg = next((m["content"] for m in reversed(self.conversation_history) if m["role"] == "assistant" and not m["content"].startswith("Error:")), None)
-        if last_ai_msg:
-            try:
-                pyperclip.copy(last_ai_msg)
-                self.update_status_bar("AI response copied to clipboard.") # Standardized
-            except pyperclip.PyperclipException as e:
-                self.update_status_bar(f"Error copying to clipboard: {e}", is_error=True) # Standardized
-        else:
-            self.update_status_bar("No AI response to copy.", is_error=True) # Standardized
+        last_ai_message = next((m["content"] for m in reversed(self.conversation_history) if m["role"] == "assistant" and not m["content"].startswith("Error:")), None)
+        if last_ai_message:
+            try: pyperclip.copy(last_ai_message); self.update_status_bar("Copied to clipboard.")
+            except Exception as e: self.update_status_bar(f"Error copying: {e}", is_error=True)
+        else: self.update_status_bar("No AI response to copy.", is_error=True)
 
     def toggle_voice_mode_globally(self):
         self.is_voice_mode_on = not self.is_voice_mode_on
         self.settings_manager.update_setting("voice_mode_on", self.is_voice_mode_on)
-        self.update_voice_mode_toggle_button_text()
-        self._apply_voice_mode_theme()
-        
-        status_msg = f"Voice mode {'On' if self.is_voice_mode_on else 'Off'}."
-        is_err = False
-        if self.is_voice_mode_on: # Check configurations only if turning voice mode ON
-            if not self.translation_llm_service or not self.translation_llm_service.is_configured(): 
-                status_msg += " Translation LLM not configured."
-                is_err = True
-            if not self.voicevox_service or not self.voicevox_service.is_configured(): 
-                status_msg += " Voicevox service not configured."
-                is_err = True
-            elif self.voicevox_service.is_configured(): # Only check engine if service itself is configured
-                vv_available, _ = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
-                if not vv_available:
-                    status_msg += " Voicevox engine unavailable."
-                    is_err = True
-        self.update_status_bar(status_msg, is_error=is_err)
-
+        if hasattr(self, 'voice_mode_toggle_button') and self.voice_mode_toggle_button: self.update_voice_mode_toggle_button_text()
+        if hasattr(self, 'conversation_scroll_frame') and self.conversation_scroll_frame: self._apply_voice_mode_theme()
+        status_msg, is_err_status = f"Voice Mode {'ON' if self.is_voice_mode_on else 'OFF'}.", False
+        if self.is_voice_mode_on:
+            if not self.translation_llm_service or not self.translation_llm_service.is_configured(): status_msg += " Translation LLM not configured."; is_err_status = True
+            if not self.voicevox_service or not self.voicevox_service.is_configured(): status_msg += " Voicevox service not configured."; is_err_status = True
+            elif self.voicevox_service.is_configured():
+                available, engine_msg = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
+                if not available: status_msg += f" Voicevox engine unavailable: {engine_msg}"; is_err_status = True
+        self.update_status_bar(status_msg, is_error=is_err_status)
 
     def update_voice_mode_toggle_button_text(self):
-        if self.voice_mode_toggle_button: 
-            if self.is_voice_mode_on:
-                self.voice_mode_toggle_button.configure(text="Voice ON (日本語)", fg_color=("green", "darkgreen"))
-            else:
-                default_fg_color = ctk.ThemeManager.theme.get("CTkButton", {}).get("fg_color", ("#3B8ED0", "#1F6AA5"))
-                self.voice_mode_toggle_button.configure(text="Voice OFF", fg_color=default_fg_color)
+        if not self.voice_mode_toggle_button or not self.voice_mode_toggle_button.winfo_exists(): return 
+        if self.is_voice_mode_on: self.voice_mode_toggle_button.select(); self.voice_mode_toggle_button.configure(text="Voice ON (日本語)")
+        else: self.voice_mode_toggle_button.deselect(); self.voice_mode_toggle_button.configure(text="Voice OFF")
 
-    def _apply_voice_mode_theme(self): 
-        if not hasattr(self, 'conversation_scroll_frame') or not self.conversation_scroll_frame: return
-        frame_theme = ctk.ThemeManager.theme.get("CTkFrame", {})
-        default_border_color = frame_theme.get("border_color", ("gray50", "gray28"))
-        default_border_width = frame_theme.get("border_width", 0)
-        if isinstance(default_border_color, str): default_border_color = (default_border_color, default_border_color)
-
-        if self.is_voice_mode_on:
-            self.conversation_scroll_frame.configure(border_color=("green", "darkgreen"), border_width=2)
-        else:
-            self.conversation_scroll_frame.configure(border_color=default_border_color, border_width=default_border_width)
-
+    def _apply_voice_mode_theme(self):
+        if not self.conversation_scroll_frame or not self.conversation_scroll_frame.winfo_exists(): return 
+        try:
+            frame_theme = ctk.ThemeManager.theme["CTkScrollableFrame"]
+            default_border_color, default_border_width = frame_theme["border_color"], frame_theme["border_width"]
+        except KeyError: default_border_color, default_border_width = ("gray70", "gray30"), 0
+        current_mode = ctk.get_appearance_mode()
+        actual_default_border_color = default_border_color[1] if isinstance(default_border_color, tuple) and current_mode == "Dark" else default_border_color[0] if isinstance(default_border_color, tuple) else default_border_color
+        if self.is_voice_mode_on: self.conversation_scroll_frame.configure(border_color="green", border_width=2)
+        else: self.conversation_scroll_frame.configure(border_color=actual_default_border_color, border_width=default_border_width)
+            
     def replay_audio(self, text_to_speak):
-        if not text_to_speak:
-            self.update_status_bar("No text to replay.", is_error=True)
-            return
-
-        self.set_input_active(False)
-        self.update_status_bar("Voicevox: Replaying audio...") 
-
-        if not self.voicevox_service or not self.voicevox_service.is_configured(): # Use is_configured()
-            gui_elements.show_critical_error_dialog(self, "Voicevox Error", "Voicevox service (engine address) not configured. Please check Settings.")
-            self.update_status_bar("Voicevox not configured for replay.", is_error=True)
-            self.set_input_active(True)
-            return
-        
-        is_vv_available, vv_message = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
-        if not is_vv_available:
-            gui_elements.show_critical_error_dialog(self, "Voicevox Error", f"Voicevox engine not found or unavailable at {self.voicevox_service.base_url}. Details: {vv_message}")
-            self.update_status_bar(f"Voicevox engine unavailable for replay. ({vv_message})", is_error=True)
-            self.set_input_active(True)
-            return
-        
+        self.update_status_bar("Replaying audio...")
+        if not text_to_speak: self.update_status_bar("Error: No text for replay.", is_error=True); return
+        if not self.voicevox_service or not self.voicevox_service.is_configured():
+            gui_elements.show_critical_error_dialog(self, "Voicevox Error", "Voicevox not configured."); self.update_status_bar("Error: Voicevox not configured for replay.", is_error=True); return
+        available, status_msg = VoicevoxService.is_engine_available(self.voicevox_service.base_url)
+        if not available:
+            gui_elements.show_critical_error_dialog(self, "Voicevox Error", f"Voicevox engine unavailable: {status_msg}"); self.update_status_bar(f"Error: Voicevox engine unavailable for replay. {status_msg}", is_error=True); return
+        self.set_input_active(False); self.update_status_bar("Voicevox: Synthesizing replay...")
         threading.Thread(target=self._replay_audio_thread_worker, args=(text_to_speak,), daemon=True).start()
 
     def _replay_audio_thread_worker(self, text_to_speak):
-        self.after(0, lambda: self.update_status_bar("Voicevox: Synthesizing replay..."))
-        audio_query, aq_error = self.voicevox_service.generate_audio_query(text_to_speak)
-        if aq_error:
-            self.after(0, lambda: self.update_status_bar(f"Replay Query Error: {aq_error[:50]}...", is_error=True))
-            self.after(0, lambda: self.set_input_active(True))
-            return
-        
-        audio_data, synth_error = self.voicevox_service.synthesize_speech_data(audio_query)
-        if synth_error:
-            self.after(0, lambda: self.update_status_bar(f"Replay Synth Error: {synth_error[:50]}...", is_error=True))
-            self.after(0, lambda: self.set_input_active(True))
-            return
-        
-        self.after(0, lambda: self.update_status_bar("Voicevox: Playing replay..."))
-        success, play_msg = self.voicevox_service.play_audio_bytes(audio_data) # Use tuple
-        self.after(0, lambda: self.update_status_bar(f"Voicevox: {play_msg}", is_error=not success))
-        if success:
-             self.after(2000, lambda: self.update_status_bar("Ready.")) 
-        self.after(0, lambda: self.set_input_active(True))
+        audio_query, error_msg_aq = self.voicevox_service.generate_audio_query(text_to_speak)
+        if error_msg_aq: self.after(0, lambda: [self.update_status_bar(f"Replay Error (Query): {error_msg_aq}", is_error=True), self.set_input_active(True)]); return
+        audio_data, error_msg_synth = self.voicevox_service.synthesize_speech_data(audio_query)
+        if error_msg_synth: self.after(0, lambda: [self.update_status_bar(f"Replay Error (Synth): {error_msg_synth}", is_error=True), self.set_input_active(True)]); return
+        self._play_audio_thread(audio_data, "replay")
 
-    def open_settings_panel(self):
-        if self.settings_panel_window is None or not self.settings_panel_window.winfo_exists():
-            self.settings_panel_window = gui_elements.SettingsPanel(parent=self, settings_manager=self.settings_manager, app=self)
-            self.update_status_bar("Settings panel opened.") 
-            self.settings_panel_window.focus()
-        else:
-            self.settings_panel_window.deiconify()
-            self.settings_panel_window.lift()
-            self.settings_panel_window.focus()
+    def cycle_theme(self):
+        current_theme_name = ctk.get_appearance_mode(); themes = ["Light", "Dark", "System"] 
+        try: current_index = themes.index(current_theme_name)
+        except ValueError: current_index = themes.index("System") 
+        self.apply_theme_from_settings_panel(themes[(current_index + 1) % len(themes)])
+
+    def apply_theme_from_settings_panel(self, theme_name: str): 
+        if theme_name in ["Light", "Dark", "System"]:
+            ctk.set_appearance_mode(theme_name); self.settings_manager.update_setting("appearance", "theme", theme_name.lower())
+            self.update_status_bar(f"Theme changed to {theme_name}.")
+        else: self.update_status_bar(f"Invalid theme name: {theme_name}", is_error=True)
+
+    def update_status_bar(self, message: str, is_error: bool = False): 
+        if self.status_label and self.status_label.winfo_exists(): 
+            prefix = "Error: " if is_error else "Status: "; default_text_color = ("black", "white")
+            try: 
+                text_color_tuple = ctk.ThemeManager.theme["CTkLabel"]["text_color"]
+                default_text_color = text_color_tuple[1] if ctk.get_appearance_mode() == "Dark" else text_color_tuple[0]
+            except Exception: pass
+            self.status_label.configure(text=prefix + message, text_color="red" if is_error else default_text_color)
+        else: print(f"Status Update (Label N/A): {message}") 
+
+    def set_input_active(self, is_active: bool): 
+        try:
+            if self.message_input_textbox and self.message_input_textbox.winfo_exists(): self.message_input_textbox.configure(state="normal" if is_active else "disabled")
+            if self.send_button and self.send_button.winfo_exists(): self.send_button.configure(state="normal" if is_active else "disabled", text="Send" if is_active else "Processing...")
+        except tk.TclError as e: print(f"Error configuring input widgets: {e}")
+                
+    def on_input_arrow_up(self, event=None): 
+        if not self.message_input_textbox or not self.sent_message_history: return "break"
+        if self.sent_message_history_index == len(self.sent_message_history): self.sent_message_history_index = len(self.sent_message_history) - 1
+        elif self.sent_message_history_index > 0: self.sent_message_history_index -= 1
+        else: self.sent_message_history_index = 0
+        if 0 <= self.sent_message_history_index < len(self.sent_message_history):
+            self.message_input_textbox.delete("1.0", "end"); self.message_input_textbox.insert("1.0", self.sent_message_history[self.sent_message_history_index]); self.message_input_textbox.mark_set("insert", "end")
+        return "break"
+
+    def on_input_arrow_down(self, event=None):
+        if not self.message_input_textbox or not self.sent_message_history: return "break"
+        if self.sent_message_history_index < len(self.sent_message_history) - 1:
+            self.sent_message_history_index += 1
+            self.message_input_textbox.delete("1.0", "end"); self.message_input_textbox.insert("1.0", self.sent_message_history[self.sent_message_history_index]); self.message_input_textbox.mark_set("insert", "end")
+        elif self.sent_message_history_index == len(self.sent_message_history) - 1:
+            self.sent_message_history_index += 1; self.message_input_textbox.delete("1.0", "end")
+        return "break"
 
 if __name__ == "__main__":
-    # Ensures that the application is run from the main thread, which is necessary for Tkinter.
-    # Also, CustomTkinter theming might need to be initialized before any CTk widgets are created.
-    ctk.set_appearance_mode("System") # Default theme
-    ctk.set_default_color_theme("blue") 
-    
     app = App()
     app.mainloop()
 
-    def cycle_theme(self):
-        current_theme_value = self.settings_manager.get_setting("appearance", "theme")
-        themes = ["light", "dark", "system"]
-        try:
-            current_index = themes.index(current_theme_value.lower())
-            next_index = (current_index + 1) % len(themes)
-            new_theme = themes[next_index]
-        except ValueError: # If current theme isn't in our list, default to system
-            new_theme = "system"
-        
-        self.settings_manager.update_setting("appearance", new_theme, "theme") # Save the new theme
-        ctk.set_appearance_mode(new_theme) # Apply the new theme
-        self.update_status_bar(f"Theme changed to {new_theme.capitalize()}.")
-        # Optionally, update cycle theme button text/icon if it's not just a cycle button
-
-    def apply_theme_from_settings_panel(self, theme_name: str):
-        if theme_name and theme_name.lower() in ["light", "dark", "system"]:
-            theme_to_apply = theme_name.lower()
-            # Capitalize for display if needed, but CTk takes lowercase or capitalized "System"
-            display_theme_name = theme_name if theme_name == "System" else theme_name.lower()
-            
-            ctk.set_appearance_mode(display_theme_name) 
-            self.settings_manager.update_setting("appearance", theme_to_apply, "theme") # This also saves
-            self.update_status_bar(f"Theme set to {theme_name.capitalize()}.")
-        else:
-            self.update_status_bar(f"Invalid theme name: {theme_name}", is_error=True)
-
-# Add new methods to the App class
-App.cycle_theme = cycle_theme
-App.apply_theme_from_settings_panel = apply_theme_from_settings_panel
+```
